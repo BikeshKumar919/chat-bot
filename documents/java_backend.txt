@@ -1,0 +1,19 @@
+# Java Backend Development
+
+## Spring Boot
+Spring Boot simplifies Java backend development by providing auto-configuration, starter dependencies, and embedded server support. Developers commonly use it to build REST APIs and microservices.
+
+## REST API Authentication
+REST APIs often use JWT (JSON Web Token) authentication. After a successful login, a server may issue a token to the client. The client sends the token in the Authorization header using the Bearer scheme. The backend validates the token before allowing access to protected endpoints.
+
+## Redis Caching
+Redis is an in-memory data store frequently used for caching. It can reduce database load and improve response times by storing frequently accessed data.
+
+## PostgreSQL
+PostgreSQL is a relational database that stores structured data in tables. Java applications can access it through JDBC, Spring Data JPA, and Hibernate.
+
+## Docker
+Docker packages applications and their dependencies into containers. Containers help developers run applications consistently across development, testing, and production environments.
+
+## Microservices
+Microservices architecture organizes an application into smaller, independently deployable services. Services often communicate using REST APIs or messaging systems such as Kafka.
