@@ -6,7 +6,10 @@ import faiss
 import numpy as np
 from dotenv import load_dotenv
 from sentence_transformers import SentenceTransformer
+
 from langchain_openai import ChatOpenAI
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
+from langchain_core.chat_history import InMemoryChatMessageHistory
 
 # --------------------------------------------------
 # 1. Load environment variables
@@ -35,10 +38,7 @@ store_dir = project_dir / "vector_store"
 
 index = faiss.read_index(str(store_dir / "documents.faiss"))
 
-with np.load(
-    store_dir / "documents_data.npz",
-    allow_pickle=False
-) as data:
+with np.load(store_dir / "documents_data.npz", allow_pickle=False) as data:
     chunks = data["chunks"].tolist()
     sources = data["sources"].tolist()
     chunk_numbers = data["chunk_numbers"].tolist()
@@ -56,14 +56,20 @@ embedding_model = SentenceTransformer(
 )
 
 # --------------------------------------------------
-# 5. Retrieve relevant document chunks
+# 5. Initialize conversation memory
+# --------------------------------------------------
+
+chat_history = InMemoryChatMessageHistory()
+
+
+# --------------------------------------------------
+# 6. Retrieve relevant document chunks
 # --------------------------------------------------
 
 def retrieve_documents(question, k=3):
 
     question_embedding = embedding_model.encode(
-        [question],
-        convert_to_numpy=True
+        [question], convert_to_numpy=True
     ).astype("float32")
 
     faiss.normalize_L2(question_embedding)
@@ -79,59 +85,121 @@ def retrieve_documents(question, k=3):
         if idx < 0:
             continue
 
-        retrieved_context.append(
-            f"""
+        retrieved_context.append(f"""
 Source: {sources[idx]}
 Chunk: {chunk_numbers[idx]}
 Similarity: {score:.3f}
 
 Content:
 {chunks[idx]}
-"""
-        )
+""")
 
     return retrieved_context
 
+
 # --------------------------------------------------
-# 6. Generate an answer using retrieved context
+# 7. Rewrite follow-up questions
+# --------------------------------------------------
+
+rewrite_prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """
+You are a question rewriting assistant.
+
+Your ONLY task is to rewrite questions.
+
+IMPORTANT:
+- Never answer the user's question.
+- Never explain anything.
+- Never provide bullet points.
+- Return exactly ONE standalone question.
+- If the user's question is already standalone,
+  return the exact original question unchanged.
+- Resolve references such as it, its, they and them
+  using conversation history.
+- Preserve the original meaning.
+
+Output only the rewritten question.
+"""
+
+    ),
+    MessagesPlaceholder(variable_name="history"),
+    ("human", "{question}")
+])
+
+rewrite_chain = rewrite_prompt | llm
+
+
+# --------------------------------------------------
+# 8. Initialize answer generation chain
+# --------------------------------------------------
+
+answer_prompt = ChatPromptTemplate.from_messages([
+    (
+        "system",
+        """
+        You are a helpful Java backend programming assistant.
+
+        Answer using the supplied document context and conversation history.
+
+        Use conversation history to understand follow-up questions.
+
+        Prefer information from the retrieved documents.
+        If the documents do not contain enough information,
+        clearly say that the answer is not available in the documents.
+
+        Do not invent document contents.
+
+        Retrieved document context:
+        {context}
+        """
+    ),
+    MessagesPlaceholder(variable_name="history"),
+    ("human", "{question}")
+])
+
+answer_chain = answer_prompt | llm
+
+
+# --------------------------------------------------
+# 9. Ask question with conversation memory
 # --------------------------------------------------
 
 def ask_question(question):
 
-    retrieved_documents = retrieve_documents(question)
+    # Step 1: Get previous conversation messages
+    history = chat_history.messages
 
-    if not retrieved_documents:
-        return "No relevant documents were found."
+    # Step 2: Rewrite the question using conversation history
+    rewritten_response = rewrite_chain.invoke({
+        "history": history,
+        "question": question
+    })
 
-    context = "\n".join(retrieved_documents)
+    standalone_question = rewritten_response.content.strip()
 
-    prompt = f"""
-You are a helpful Java backend programming assistant.
+    print("\nRewritten question:", standalone_question)
 
-Answer the user's question using ONLY the information
-provided in the context below.
+    # Step 3: Retrieve documents using rewritten question
+    context = retrieve_documents(standalone_question)
 
-If the context does not contain enough information,
-clearly say that the answer is not available in the
-provided documents.
+    # Step 4: Generate answer using conversation history
+    response = answer_chain.invoke({
+        "question": question,
+        "context": "\n".join(context),
+        "history": history
+    })
 
-Do not invent information.
-
-Context:
-{context}
-
-User question:
-{question}
-
-Answer:
-"""
-
-    response = llm.invoke(prompt)
+    # Step 5: Save current conversation in memory
+    chat_history.add_user_message(question)
+    chat_history.add_ai_message(response.content)
 
     return response.content
 
+
 # --------------------------------------------------
-# 7. Interactive chatbot
+# 10. Interactive chatbot
 # --------------------------------------------------
 
 print("\n===== Java Backend RAG Assistant =====")
@@ -140,7 +208,12 @@ print("Type 'exit' to quit.\n")
 
 while True:
 
-    question = input("You: ").strip()
+    try:
+        question = input("You: ").strip()
+
+    except KeyboardInterrupt:
+        print("\n\nChatbot stopped.")
+        break
 
     if question.lower() == "exit":
         print("Goodbye!")
