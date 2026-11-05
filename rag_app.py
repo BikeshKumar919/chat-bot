@@ -10,6 +10,7 @@ from sentence_transformers import SentenceTransformer
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.chat_history import InMemoryChatMessageHistory
+from langchain_community.chat_message_histories import SQLChatMessageHistory
 
 # --------------------------------------------------
 # 1. Load environment variables
@@ -59,7 +60,16 @@ embedding_model = SentenceTransformer(
 # 5. Initialize conversation memory
 # --------------------------------------------------
 
-chat_history = InMemoryChatMessageHistory()
+# --------------------------------------------------
+# Initialize persistent SQLite conversation memory
+# --------------------------------------------------
+
+def get_session_history(session_id: str):
+
+    return SQLChatMessageHistory(
+        session_id=session_id,
+        connection="sqlite:///chat_history.db"
+    )
 
 
 # --------------------------------------------------
@@ -166,12 +176,13 @@ answer_chain = answer_prompt | llm
 # 9. Ask question with conversation memory
 # --------------------------------------------------
 
-def ask_question(question):
+def ask_question(question, session_id):
 
-    # Step 1: Get previous conversation messages
+    # Step 1: Get memory for this session
+    chat_history = get_session_history(session_id)
     history = chat_history.messages
 
-    # Step 2: Rewrite the question using conversation history
+    # Step 2: Rewrite question using this session's history
     rewritten_response = rewrite_chain.invoke({
         "history": history,
         "question": question
@@ -184,14 +195,14 @@ def ask_question(question):
     # Step 3: Retrieve documents using rewritten question
     context = retrieve_documents(standalone_question)
 
-    # Step 4: Generate answer using conversation history
+    # Step 4: Generate answer using this session's history
     response = answer_chain.invoke({
         "question": question,
         "context": "\n".join(context),
         "history": history
     })
 
-    # Step 5: Save current conversation in memory
+    # Step 5: Save messages in this session's memory
     chat_history.add_user_message(question)
     chat_history.add_ai_message(response.content)
 
@@ -223,7 +234,9 @@ while True:
         continue
 
     try:
-        answer = ask_question(question)
+        session_id = input("Session ID (user-A/user-B): ").strip()
+
+        answer = ask_question(question, session_id)
 
         print("\nAI:", answer)
         print("\n" + "-" * 60 + "\n")
