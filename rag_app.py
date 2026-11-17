@@ -1,4 +1,4 @@
-
+import re
 import os
 from pathlib import Path
 
@@ -43,6 +43,7 @@ with np.load(store_dir / "documents_data.npz", allow_pickle=False) as data:
     chunks = data["chunks"].tolist()
     sources = data["sources"].tolist()
     chunk_numbers = data["chunk_numbers"].tolist()
+    pages = data["pages"].tolist()
 
 print(f"Loaded {index.ntotal} vectors from FAISS.")
 
@@ -52,9 +53,7 @@ print(f"Loaded {index.ntotal} vectors from FAISS.")
 
 print("Loading embedding model...")
 
-embedding_model = SentenceTransformer(
-    "sentence-transformers/all-MiniLM-L6-v2"
-)
+embedding_model = SentenceTransformer("sentence-transformers/all-MiniLM-L6-v2")
 
 # --------------------------------------------------
 # 5. Initialize conversation memory
@@ -64,17 +63,18 @@ embedding_model = SentenceTransformer(
 # Initialize persistent SQLite conversation memory
 # --------------------------------------------------
 
+
 def get_session_history(session_id: str):
 
     return SQLChatMessageHistory(
-        session_id=session_id,
-        connection="sqlite:///chat_history.db"
+        session_id=session_id, connection="sqlite:///chat_history.db"
     )
 
 
 # --------------------------------------------------
 # 6. Retrieve relevant document chunks
 # --------------------------------------------------
+
 
 def retrieve_documents(question, k=3):
 
@@ -95,8 +95,18 @@ def retrieve_documents(question, k=3):
         if idx < 0:
             continue
 
+        source = sources[idx]
+        page = pages[idx]
+
+        # Build source information
+        if page >= 0:
+            location = f"PDF Page: {page + 1}"
+        else:
+            location = "Text File"
+
         retrieved_context.append(f"""
-Source: {sources[idx]}
+Source: {source}
+{location}
 Chunk: {chunk_numbers[idx]}
 Similarity: {score:.3f}
 
@@ -111,10 +121,11 @@ Content:
 # 7. Rewrite follow-up questions
 # --------------------------------------------------
 
-rewrite_prompt = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """
+rewrite_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
 You are a question rewriting assistant.
 
 Your ONLY task is to rewrite questions.
@@ -131,12 +142,12 @@ IMPORTANT:
 - Preserve the original meaning.
 
 Output only the rewritten question.
-"""
-
-    ),
-    MessagesPlaceholder(variable_name="history"),
-    ("human", "{question}")
-])
+""",
+        ),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "{question}"),
+    ]
+)
 
 rewrite_chain = rewrite_prompt | llm
 
@@ -145,36 +156,68 @@ rewrite_chain = rewrite_prompt | llm
 # 8. Initialize answer generation chain
 # --------------------------------------------------
 
-answer_prompt = ChatPromptTemplate.from_messages([
-    (
-        "system",
-        """
-        You are a helpful Java backend programming assistant.
 
-        Answer using the supplied document context and conversation history.
+answer_prompt = ChatPromptTemplate.from_messages(
+    [
+        (
+            "system",
+            """
+You are a helpful Java backend programming assistant.
 
-        Use conversation history to understand follow-up questions.
+Answer questions using the supplied document context.
 
-        Prefer information from the retrieved documents.
-        If the documents do not contain enough information,
-        clearly say that the answer is not available in the documents.
+Instructions:
 
-        Do not invent document contents.
+1. Prefer information from the retrieved documents.
+2. Use conversation history to understand follow-up questions.
+3. If the documents do not contain enough information,
+   clearly say that the answer is not available in the documents.
+4. Never invent document contents.
+5. When using information from retrieved passages,
+   mention the source filename.
+6. For PDF sources, mention the PDF page number.
+7. Do not invent page numbers or sources.
 
-        Retrieved document context:
-        {context}
-        """
-    ),
-    MessagesPlaceholder(variable_name="history"),
-    ("human", "{question}")
-])
+Retrieved document context:
+{context}
+""",
+        ),
+        MessagesPlaceholder(variable_name="history"),
+        ("human", "{question}"),
+    ]
+)
+
 
 answer_chain = answer_prompt | llm
+
+
+def needs_question_rewriting(question):
+
+    follow_up_patterns = [
+        r"\bit\b",
+        r"\bits\b",
+        r"\bthey\b",
+        r"\bthem\b",
+        r"\btheir\b",
+        r"\bthese\b",
+        r"\bthose\b",
+        r"\bthat\b",
+        r"\bthis\b",
+        r"\bformer\b",
+        r"\blatter\b",
+    ]
+
+    return any(re.search(pattern, question.lower()) for pattern in follow_up_patterns)
+
+
+
 
 
 # --------------------------------------------------
 # 9. Ask question with conversation memory
 # --------------------------------------------------
+
+
 
 def ask_question(question, session_id):
 
@@ -182,27 +225,38 @@ def ask_question(question, session_id):
     chat_history = get_session_history(session_id)
     history = chat_history.messages
 
-    # Step 2: Rewrite question using this session's history
-    rewritten_response = rewrite_chain.invoke({
-        "history": history,
-        "question": question
-    })
+    # Step 2: Rewrite only follow-up questions
+    if history and needs_question_rewriting(question):
 
-    standalone_question = rewritten_response.content.strip()
+        rewritten_response = rewrite_chain.invoke({
+            "history": history,
+            "question": question
+        })
 
-    print("\nRewritten question:", standalone_question)
+        standalone_question = rewritten_response.content.strip()
 
-    # Step 3: Retrieve documents using rewritten question
+        # Validate the rewrite
+        if not standalone_question.endswith("?"):
+            print("Invalid rewrite detected. Using original question.")
+            standalone_question = question
+
+        print("\nRewritten question:", standalone_question)
+
+    else:
+        standalone_question = question
+        print("\nStandalone question:", standalone_question)
+
+    # Step 3: Retrieve relevant documents
     context = retrieve_documents(standalone_question)
 
-    # Step 4: Generate answer using this session's history
+    # Step 4: Generate answer
     response = answer_chain.invoke({
         "question": question,
         "context": "\n".join(context),
         "history": history
     })
 
-    # Step 5: Save messages in this session's memory
+    # Step 5: Save conversation
     chat_history.add_user_message(question)
     chat_history.add_ai_message(response.content)
 
@@ -243,3 +297,5 @@ while True:
 
     except Exception as error:
         print(f"\nRequest failed: {error}\n")
+
+
