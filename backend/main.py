@@ -8,6 +8,8 @@ from fastapi.openapi.utils import get_openapi
 from backend.services.resume_parser import extract_resume_text
 from pydantic import BaseModel
 from fastapi import HTTPException
+from pydantic import BaseModel
+from backend.services.candidate_search import search_and_rank_candidates
 
 from backend.services.job_analyzer import analyze_job_description
 
@@ -267,3 +269,19 @@ async def evaluate_candidates(request: JobDescriptionRequest):
             status_code=400,
             detail=str(error)
         )    
+
+
+
+class CandidateSearchRequest(BaseModel):
+    job_id: str
+    query: str
+
+@app.post("/candidates/search")
+def search_candidates(request: CandidateSearchRequest):
+
+    results = search_and_rank_candidates(
+        query=request.query,
+        job_id=request.job_id
+    )
+
+    return results
